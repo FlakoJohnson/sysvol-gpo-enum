@@ -29,7 +29,6 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
-	"io"
 	"math/big"
 	mathrand "math/rand"
 	"os"
@@ -38,8 +37,9 @@ import (
 	"time"
 	"unicode/utf16"
 
-	gsmb  "github.com/mandiant/gopacket/pkg/smb"
-	gldap "github.com/mandiant/gopacket/pkg/ldap"
+	gsmb    "github.com/mandiant/gopacket/pkg/smb"
+	gldap   "github.com/mandiant/gopacket/pkg/ldap"
+	"github.com/mandiant/gopacket/pkg/session"
 )
 
 // ─────────────────────────────────────────────────────────────
@@ -137,62 +137,53 @@ func jitter() {
 // SMB transport via gopacket/pkg/smb
 // ─────────────────────────────────────────────────────────────
 
-// smbSession wraps a mounted gopacket SMB share.
+// smbSession wraps a connected gopacket SMB client with SYSVOL mounted.
 type smbSession struct {
 	client *gsmb.Client
-	share  gsmb.Share
 }
 
 func connectSMB(o opts) (*smbSession, error) {
-	clientOpts := gsmb.Options{
-		Host:        o.DCIP,
+	target := session.Target{
+		Host: o.DC,
+		IP:   o.DCIP,
+		Port: 445,
+	}
+	creds := session.Credentials{
 		Domain:      o.Domain,
-		Workstation: randomHostname(), // IoC-12: real hostname, not null
-	}
-	if o.Proxy != "" {
-		clientOpts.ProxyURL = o.Proxy
-	}
-
-	client, err := gsmb.NewClient(clientOpts)
-	if err != nil {
-		return nil, fmt.Errorf("smb client init: %w", err)
+		Username:    o.Username,
+		Password:    o.Password,
+		Hash:        o.Hashes,
+		UseKerberos: o.Kerberos,
+		DCIP:        o.DCIP,
 	}
 
-	if o.Kerberos {
-		if err := client.KerberosLogin(o.Username, o.Domain); err != nil {
-			return nil, fmt.Errorf("smb kerberos auth: %w", err)
-		}
-	} else {
-		if err := client.NTLMLogin(o.Domain, o.Username, o.Password, o.lmHash(), o.ntHash()); err != nil {
-			return nil, fmt.Errorf("smb ntlm auth: %w", err)
-		}
+	client := gsmb.NewClient(target, &creds)
+	if err := client.Connect(); err != nil {
+		return nil, fmt.Errorf("smb connect: %w", err)
 	}
-
-	share, err := client.Mount("SYSVOL")
-	if err != nil {
+	if err := client.UseShare("SYSVOL"); err != nil {
+		client.Close()
 		return nil, fmt.Errorf("mount SYSVOL: %w", err)
 	}
-	return &smbSession{client: client, share: share}, nil
+	return &smbSession{client: client}, nil
 }
 
-// listDir returns the directory entries under path on the share.
-func (s *smbSession) listDir(path string) ([]gsmb.DirEntry, error) {
-	return s.share.ReadDir(path)
+// listDir returns os.FileInfo entries under path on the share.
+func (s *smbSession) listDir(path string) ([]os.FileInfo, error) {
+	return s.client.Ls(path)
 }
 
 // readFile reads a file from the share and returns its bytes.
 func (s *smbSession) readFile(path string) ([]byte, error) {
-	f, err := s.share.Open(path)
+	content, err := s.client.Cat(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	return io.ReadAll(f)
+	return []byte(content), nil
 }
 
 func (s *smbSession) close() {
-	_ = s.share.Umount()
-	_ = s.client.Close()
+	s.client.Close()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -200,28 +191,44 @@ func (s *smbSession) close() {
 // ─────────────────────────────────────────────────────────────
 
 type ldapConn struct {
-	conn   *gldap.Conn
+	conn   *gldap.Client
 	baseDN string
 }
 
 func connectLDAP(o opts) (*ldapConn, error) {
 	baseDN := "DC=" + strings.Join(strings.Split(o.Domain, "."), ",DC=")
 
-	conn, err := gldap.Dial(o.DCIP, 389)
-	if err != nil {
-		return nil, fmt.Errorf("ldap dial: %w", err)
+	target := session.Target{
+		Host: o.DC,
+		IP:   o.DCIP,
+		Port: 389,
+	}
+	creds := session.Credentials{
+		Domain:      o.Domain,
+		Username:    o.Username,
+		Password:    o.Password,
+		Hash:        o.Hashes,
+		UseKerberos: o.Kerberos,
+		DCIP:        o.DCIP,
 	}
 
+	conn := gldap.NewClient(target, &creds)
+	if err := conn.Connect(false); err != nil {
+		return nil, fmt.Errorf("ldap connect: %w", err)
+	}
+
+	var authErr error
 	if o.Kerberos {
-		if err := conn.KerberosBindFull(o.Username, o.Domain); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("ldap kerberos bind: %w", err)
-		}
+		authErr = conn.LoginWithKerberos()
+	} else if o.Hashes != "" {
+		authErr = conn.LoginWithHash()
 	} else {
-		if err := conn.NTLMBindFull(o.Domain, o.Username, o.Password, o.lmHash(), o.ntHash()); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("ldap ntlm bind: %w", err)
-		}
+		// Use UPN format for simple bind — FQDN\user fails on some DCs
+		authErr = conn.LoginWithUser(o.Username + "@" + o.Domain)
+	}
+	if authErr != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ldap auth: %w", authErr)
 	}
 	return &ldapConn{conn: conn, baseDN: baseDN}, nil
 }
@@ -244,7 +251,6 @@ func getGPONames(lc *ldapConn) (map[string]gpoMeta, error) {
 	results, err := lc.conn.Search(searchBase,
 		"(objectClass=groupPolicyContainer)",
 		[]string{"cn", "displayName", "flags", "versionNumber"},
-		gldap.ScopeWholeSubtree,
 	)
 	if err != nil {
 		return out, err
@@ -268,7 +274,6 @@ func getGPOLinks(lc *ldapConn) (map[string][]string, error) {
 	results, err := lc.conn.Search(lc.baseDN,
 		"(gPLink=*)",
 		[]string{"distinguishedName", "gPLink"},
-		gldap.ScopeWholeSubtree,
 	)
 	if err != nil {
 		return out, err
@@ -313,8 +318,6 @@ type GPOResult struct {
 // ─────────────────────────────────────────────────────────────
 // cPassword decryptor — MS14-025 (AES-256-CBC, published key)
 // ─────────────────────────────────────────────────────────────
-
-var cpassKey, _ = hex.2bytes("4e9906e8fcb66cc9faf49310620ffee8f496e806cc057990209b09a433b66c1b")
 
 // hex string → []byte helper (called at init)
 func mustHex(s string) []byte {
@@ -385,7 +388,7 @@ func parseGptTmpl(data []byte) []Finding {
 		if !strings.Contains(line, "=") {
 			continue
 		}
-		k, _, v := strings.Cut(line, "=")
+		k, v, _ := strings.Cut(line, "=")
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		kl := strings.ToLower(k)
 
@@ -926,7 +929,7 @@ func main() {
 	}
 
 	// ── Enumerate SYSVOL\<domain>\Policies
-	policiesPath := fmt.Sprintf("\\%s\\Policies", o.Domain)
+	policiesPath := fmt.Sprintf("%s\\Policies", o.Domain)
 	info("Enumerating SYSVOL: \\\\%s\\SYSVOL%s", o.DC, policiesPath)
 
 	topEntries, err := smbs.listDir(policiesPath)
