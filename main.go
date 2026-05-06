@@ -30,7 +30,6 @@ import (
 	"flag"
 	"fmt"
 	"math/big"
-	mathrand "math/rand"
 	"os"
 	"regexp"
 	"strings"
@@ -888,22 +887,6 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// randomHostname generates a realistic Windows machine name for NTLM.
-// Uses crypto/rand — no IoC-12 null hostname, no IoC-41 alnum-only patterns.
-func randomHostname() string {
-	prefixes := []string{"DESKTOP", "LAPTOP", "WKS", "PC"}
-	// 8 random uppercase alphanum chars via crypto/rand
-	const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	suffix := make([]byte, 8)
-	for i := range suffix {
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
-		suffix[i] = charset[n.Int64()]
-	}
-	// Pick a random prefix via math/rand seeded from crypto/rand
-	seed, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
-	rng := mathrand.New(mathrand.NewSource(seed.Int64()))
-	return prefixes[rng.Intn(len(prefixes))] + "-" + string(suffix)
-}
 
 // ─────────────────────────────────────────────────────────────
 // main
