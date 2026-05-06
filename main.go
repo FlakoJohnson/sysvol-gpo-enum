@@ -47,26 +47,28 @@ import (
 // ─────────────────────────────────────────────────────────────
 
 const (
-	cReset = "\033[0m"
-	cRed   = "\033[91m"
-	cYel   = "\033[93m"
-	cCyan  = "\033[96m"
-	cGrn   = "\033[92m"
-	cDim   = "\033[2m"
-	cBold  = "\033[1m"
+	cReset  = "\033[0m"
+	cBold   = "\033[1m"
+	cDim    = "\033[2m"
+	cLime   = "\033[38;5;118m"
+	cPurple = "\033[38;5;135m"
+	cRed    = "\033[91m"
+	cYel    = "\033[93m"
 )
 
-const banner = cCyan + `
-  ███████╗██╗   ██╗███████╗██╗   ██╗ ██████╗ ██╗
-  ██╔════╝╚██╗ ██╔╝██╔════╝╚██╗ ██╔╝██╔═══██╗██║
-  ███████╗ ╚████╔╝ ███████╗ ╚████╔╝ ██║   ██║██║
-  ╚════██║  ╚██╔╝  ╚════██║  ╚██╔╝  ██║   ██║██║
-  ███████║   ██║   ███████║   ██║   ╚██████╔╝███████╗
-  ╚══════╝   ╚═╝   ╚══════╝   ╚═╝    ╚═════╝ ╚══════╝` +
-	cDim + "\n  SYSVOL GPO Enumerator — Bishop Fox RT [Go]\n" + cReset
+const banner = cLime + cBold + `
+  ╔════════════════════════════════════════════════════════════════════════╗
+  ║  ███████╗██╗   ██╗███████╗██╗   ██╗ ██████╗ ██╗                      ║
+  ║  ██╔════╝╚██╗ ██╔╝██╔════╝╚██╗ ██╔╝██╔═══██╗██║                      ║
+  ║  ███████╗ ╚████╔╝ ███████╗ ╚████╔╝ ██║   ██║██║                      ║
+  ║  ╚════██║  ╚██╔╝  ╚════██║  ╚██╔╝  ██║   ██║██║                      ║
+  ║  ███████║   ██║   ███████║   ██║   ╚██████╔╝███████╗                  ║
+  ║  ╚══════╝   ╚═╝   ╚══════╝   ╚═╝    ╚═════╝ ╚══════╝                  ║
+  ║` + cReset + cPurple + `  SYSVOL / GPO Enumerator  //  red team use only                    ` + cLime + cBold + `║
+  ╚════════════════════════════════════════════════════════════════════════╝` + cReset + "\n"
 
-func info(f string, a ...any) { fmt.Printf(cCyan+"[*]"+cReset+" "+f+"\n", a...) }
-func good(f string, a ...any) { fmt.Printf(cGrn+"[+]"+cReset+" "+f+"\n", a...) }
+func info(f string, a ...any) { fmt.Printf(cLime+"[*]"+cReset+" "+f+"\n", a...) }
+func good(f string, a ...any) { fmt.Printf(cLime+"[+]"+cReset+" "+f+"\n", a...) }
 func warn(f string, a ...any) { fmt.Printf(cYel+"[!]"+cReset+" "+f+"\n", a...) }
 func crit(f string, a ...any) { fmt.Printf(cRed+"[!!]"+cReset+" "+cBold+f+cReset+"\n", a...) }
 
@@ -795,7 +797,7 @@ func walkGPO(smbs *smbSession, gpoPath, guid string, meta gpoMeta, links []strin
 var sevColour = map[string]string{
 	"CRITICAL": cRed,
 	"HIGH":     cYel,
-	"MEDIUM":   cCyan,
+	"MEDIUM":   cLime,
 	"INFO":     cDim,
 }
 
@@ -821,7 +823,7 @@ func printReport(results []GPOResult, showAll bool) {
 		case "3":
 			flagStr = cRed + " [ALL disabled]" + cReset
 		}
-		fmt.Printf("\n%s%s%s%s%s\n", cBold, cCyan, r.DisplayName, cReset, flagStr)
+		fmt.Printf("\n%s%s%s%s%s\n", cBold, cLime, r.DisplayName, cReset, flagStr)
 		fmt.Printf("  %sGUID   : {%s}%s\n", cDim, strings.ToUpper(r.GUID), cReset)
 		fmt.Printf("  %sVersion: %s  |  Files: %d%s\n", cDim, r.Version, len(r.Files), cReset)
 		for _, link := range r.Links {
