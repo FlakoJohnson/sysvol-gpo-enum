@@ -718,6 +718,222 @@ func parseScript(path string, data []byte) []Finding {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Registry.xml parser — Group Policy Preferences registry entries
+// ─────────────────────────────────────────────────────────────
+
+type registryXMLSettings struct {
+	XMLName xml.Name          `xml:"RegistrySettings"`
+	Items   []registryXMLItem `xml:"Registry"`
+}
+type registryXMLItem struct {
+	Properties registryXMLProps `xml:"Properties"`
+}
+type registryXMLProps struct {
+	Action string `xml:"action,attr"`
+	Hive   string `xml:"hive,attr"`
+	Key    string `xml:"key,attr"`
+	Name   string `xml:"name,attr"`
+	Type   string `xml:"type,attr"`
+	Value  string `xml:"value,attr"`
+}
+
+func parseRegistryXML(data []byte) []Finding {
+	var findings []Finding
+	var root registryXMLSettings
+	if err := xml.Unmarshal(data, &root); err != nil {
+		return findings
+	}
+
+	for _, item := range root.Items {
+		p := item.Properties
+		fullKey  := strings.ToLower(p.Hive + `\` + p.Key)
+		nameLow  := strings.ToLower(p.Name)
+		valueLow := strings.ToLower(p.Value)
+		detail   := fmt.Sprintf(`%s\%s\%s = %s [%s, action=%s]`, p.Hive, p.Key, p.Name, p.Value, p.Type, p.Action)
+
+		var found *Finding
+
+		// ── Credential indicators in value name ──────────────────
+		for _, kw := range []string{"password", "passwd", "pwd", "secret", "credential", "apikey", "api_key", "token"} {
+			if strings.Contains(nameLow, kw) {
+				found = &Finding{Severity: "CRITICAL", Description: fmt.Sprintf("Registry.xml credential-named value: %s", p.Name)}
+				break
+			}
+		}
+
+		// ── AutoLogon ────────────────────────────────────────────
+		if found == nil && strings.Contains(fullKey, `winlogon`) {
+			switch {
+			case nameLow == "autoadminlogon" && p.Value == "1":
+				found = &Finding{Severity: "CRITICAL", Description: "AutoAdminLogon enabled via GPP registry"}
+			case nameLow == "defaultpassword":
+				found = &Finding{Severity: "CRITICAL", Description: "AutoLogon plaintext password pushed via GPP"}
+			case nameLow == "defaultusername":
+				found = &Finding{Severity: "HIGH", Description: "AutoLogon username set via GPP"}
+			}
+		}
+
+		// ── WDigest cleartext creds ──────────────────────────────
+		if found == nil && strings.Contains(fullKey, `wdigest`) && nameLow == "uselogoncredential" && p.Value == "1" {
+			found = &Finding{Severity: "CRITICAL", Description: "WDigest cleartext creds enabled (UseLogonCredential=1)"}
+		}
+
+		// ── AlwaysInstallElevated ────────────────────────────────
+		if found == nil && nameLow == "alwaysinstallelevated" && p.Value == "1" {
+			found = &Finding{Severity: "CRITICAL", Description: "AlwaysInstallElevated=1 — MSI local privesc"}
+		}
+
+		// ── LSA / NTLM settings ──────────────────────────────────
+		if found == nil && strings.Contains(fullKey, `\lsa`) {
+			switch {
+			case nameLow == "runasppl" && p.Value == "0":
+				found = &Finding{Severity: "HIGH", Description: "LSA Protection disabled (RunAsPPL=0)"}
+			case nameLow == "lmcompatibilitylevel":
+				if n := atoi(p.Value); n < 3 {
+					found = &Finding{Severity: "HIGH", Description: fmt.Sprintf("NTLMv1 allowed (LmCompatibilityLevel=%d — needs ≥3 for NTLMv2 only)", n)}
+				}
+			case nameLow == "nolmhash" && p.Value == "0":
+				found = &Finding{Severity: "HIGH", Description: "LM hash storage enabled (NoLMHash=0)"}
+			case nameLow == "disablerestrictedadmin" && p.Value == "1":
+				found = &Finding{Severity: "HIGH", Description: "RestrictedAdmin mode disabled — pass-the-hash to RDP possible"}
+			case nameLow == "cachedlogonscount":
+				n := atoi(p.Value)
+				if n == 0 {
+					found = &Finding{Severity: "INFO", Description: "Domain credential caching disabled (CachedLogonsCount=0)"}
+				} else {
+					found = &Finding{Severity: "INFO", Description: fmt.Sprintf("Domain credential cache count: %s", p.Value)}
+				}
+			case nameLow == "everyoneincludesanonymous" && p.Value == "1":
+				found = &Finding{Severity: "HIGH", Description: "Anonymous access — Everyone includes anonymous"}
+			case nameLow == "restrictnullsessaccess" && p.Value == "0":
+				found = &Finding{Severity: "HIGH", Description: "Null session access allowed (RestrictNullSessAccess=0)"}
+			}
+		}
+
+		// ── Defender / AV disabled ───────────────────────────────
+		if found == nil && strings.Contains(fullKey, `windows defender`) {
+			switch nameLow {
+			case "disableantispyware":
+				if p.Value == "1" {
+					found = &Finding{Severity: "HIGH", Description: "Windows Defender disabled (DisableAntiSpyware=1)"}
+				}
+			case "disablerealtimemonitoring":
+				if p.Value == "1" {
+					found = &Finding{Severity: "HIGH", Description: "Defender real-time monitoring disabled"}
+				}
+			case "disablebehaviormonitoring":
+				if p.Value == "1" {
+					found = &Finding{Severity: "HIGH", Description: "Defender behavior monitoring disabled"}
+				}
+			case "disableioavprotection":
+				if p.Value == "1" {
+					found = &Finding{Severity: "HIGH", Description: "Defender IOAV protection disabled"}
+				}
+			case "disablescriptscanning":
+				if p.Value == "1" {
+					found = &Finding{Severity: "HIGH", Description: "Defender script scanning disabled"}
+				}
+			}
+		}
+
+		// ── UAC weakening ────────────────────────────────────────
+		if found == nil && strings.Contains(fullKey, `policies\system`) {
+			switch {
+			case nameLow == "enablelua" && p.Value == "0":
+				found = &Finding{Severity: "HIGH", Description: "UAC disabled (EnableLUA=0)"}
+			case nameLow == "consentpromptbehavioradmin" && p.Value == "0":
+				found = &Finding{Severity: "HIGH", Description: "UAC admin consent prompt suppressed (ConsentPromptBehaviorAdmin=0)"}
+			case nameLow == "localaccounttokenfilterpolicy" && p.Value == "1":
+				found = &Finding{Severity: "HIGH", Description: "LocalAccountTokenFilterPolicy=1 — remote admin token not stripped (PtH pivot)"}
+			case nameLow == "filteradministratortoken" && p.Value == "0":
+				found = &Finding{Severity: "HIGH", Description: "Built-in Administrator token not filtered for UAC"}
+			}
+		}
+
+		// ── WinRM ────────────────────────────────────────────────
+		if found == nil && strings.Contains(fullKey, `winrm`) {
+			switch {
+			case nameLow == "allowunencryptedtraffic" && p.Value == "1":
+				found = &Finding{Severity: "HIGH", Description: "WinRM allows unencrypted traffic"}
+			case nameLow == "allownegotiate" && p.Value == "1":
+				found = &Finding{Severity: "MEDIUM", Description: "WinRM allows Negotiate (NTLM) auth"}
+			case nameLow == "allowbasicauthentication" && p.Value == "1":
+				found = &Finding{Severity: "HIGH", Description: "WinRM allows Basic auth (cleartext credentials)"}
+			}
+		}
+
+		// ── RDP ──────────────────────────────────────────────────
+		if found == nil && strings.Contains(fullKey, `terminal server`) {
+			switch {
+			case nameLow == "fdenytsconnections" && p.Value == "0":
+				found = &Finding{Severity: "MEDIUM", Description: "RDP enabled (fDenyTSConnections=0)"}
+			case nameLow == "userpasswordenabled" && p.Value == "1":
+				found = &Finding{Severity: "HIGH", Description: "RDP saved password enabled"}
+			case nameLow == "disablepasswordsaving" && p.Value == "0":
+				found = &Finding{Severity: "MEDIUM", Description: "RDP password saving allowed"}
+			}
+		}
+
+		// ── SMB signing ──────────────────────────────────────────
+		if found == nil && strings.Contains(fullKey, `lanmanserver\parameters`) {
+			switch {
+			case nameLow == "requiresecuritysignature" && p.Value == "0":
+				found = &Finding{Severity: "HIGH", Description: "SMB signing not required (server-side) — relay attacks viable"}
+			case nameLow == "enablesecuritysignature" && p.Value == "0":
+				found = &Finding{Severity: "MEDIUM", Description: "SMB signing disabled on server"}
+			}
+		}
+		if found == nil && strings.Contains(fullKey, `lanmanworkstation\parameters`) {
+			if nameLow == "requiresecuritysignature" && p.Value == "0" {
+				found = &Finding{Severity: "HIGH", Description: "SMB signing not required on client — relay attacks viable"}
+			}
+		}
+
+		// ── PowerShell execution policy ──────────────────────────
+		if found == nil && strings.Contains(fullKey, `powershell`) && nameLow == "executionpolicy" {
+			switch valueLow {
+			case "bypass", "unrestricted":
+				found = &Finding{Severity: "MEDIUM", Description: fmt.Sprintf("PowerShell execution policy: %s", p.Value)}
+			case "remotesigned":
+				found = &Finding{Severity: "INFO", Description: "PowerShell execution policy: RemoteSigned"}
+			}
+		}
+
+		// ── Firewall disabled ────────────────────────────────────
+		if found == nil && strings.Contains(fullKey, `firewall`) {
+			if nameLow == "enablefirewall" && p.Value == "0" {
+				found = &Finding{Severity: "HIGH", Description: "Windows Firewall disabled via GPP"}
+			}
+		}
+
+		// ── Run / RunOnce persistence keys ───────────────────────
+		if found == nil {
+			keyParts := strings.ToLower(p.Key)
+			if strings.HasSuffix(keyParts, `\run`) || strings.HasSuffix(keyParts, `\runonce`) ||
+				strings.Contains(keyParts, `\run\`) {
+				found = &Finding{Severity: "INFO", Description: fmt.Sprintf("GPP run key entry: %s → %s", p.Name, truncate(p.Value, 80))}
+			}
+		}
+
+		// ── Credential in value data (fallback) ──────────────────
+		if found == nil && len(p.Value) > 6 && len(p.Value) < 512 {
+			for _, kw := range []string{"password", "passwd", "secret"} {
+				if strings.Contains(valueLow, kw) {
+					found = &Finding{Severity: "HIGH", Description: fmt.Sprintf("Possible credential in registry value data: %s", p.Name)}
+					break
+				}
+			}
+		}
+
+		if found != nil {
+			found.Detail = detail
+			findings = append(findings, *found)
+		}
+	}
+	return findings
+}
+
+// ─────────────────────────────────────────────────────────────
 // SYSVOL walker
 // ─────────────────────────────────────────────────────────────
 
@@ -728,6 +944,7 @@ var interestingFiles = map[string]struct {
 	"groups.xml":         {"Groups / Local Admins (MS14-025)", parseGroupsXML},
 	"drives.xml":         {"Mapped Drives",                    parseDrivesXML},
 	"scheduledtasks.xml": {"Scheduled Tasks",                  parseScheduledTasksXML},
+	"registry.xml":       {"Registry Preferences (GPP)",       parseRegistryXML},
 	"registry.pol":       {"Registry Policy",                  parseRegistryPol},
 	"gpttmpl.inf":        {"Security Template",                parseGptTmpl},
 }
