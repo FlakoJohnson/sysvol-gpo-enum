@@ -86,6 +86,7 @@ type opts struct {
 	Kerberos     bool
 	Proxy        string
 	Outfile      string
+	Policy       string // target a single GPO by GUID or display name
 	All          bool
 	Verbose      bool
 }
@@ -109,11 +110,12 @@ func parseArgs() opts {
 	flag.StringVar(&o.DCIP,         "dc-ip",         "",    "DC IP (if DC arg is a hostname)")
 	flag.StringVar(&o.Proxy,        "proxy",         "",    "SOCKS5 proxy (e.g. socks5h://127.0.0.1:1080)")
 	flag.StringVar(&o.Outfile,      "o",             "",    "JSON output file")
+	flag.StringVar(&o.Policy,       "policy",        "",    "Enumerate only this GPO (GUID or display name, case-insensitive)")
 	flag.BoolVar  (&o.All,          "all",           false, "Show GPOs with no findings")
 	flag.BoolVar  (&o.Verbose,      "v",             false, "Verbose output")
 	flag.Parse()
 	if flag.NArg() < 1 || o.Domain == "" || o.Username == "" {
-		fmt.Fprintln(os.Stderr, "usage: sysvol-gpo-enum -u USER -p PASS -d DOMAIN [-target-domain DOMAIN] [-H LM:NT] [-k] [-dc-ip IP] [-proxy URL] [-o FILE] [-all] [-v] <DC>")
+		fmt.Fprintln(os.Stderr, "usage: sysvol-gpo-enum -u USER -p PASS -d DOMAIN [-target-domain DOMAIN] [-H LM:NT] [-k] [-dc-ip IP] [-proxy URL] [-o FILE] [-policy NAME|GUID] [-all] [-v] <DC>")
 		os.Exit(1)
 	}
 	o.DC = flag.Arg(0)
@@ -950,6 +952,25 @@ func main() {
 		})
 	}
 	good("Found %d GPO directories in SYSVOL", len(gpoDirs))
+
+	// ── Filter to a single policy if requested
+	if o.Policy != "" {
+		needle := strings.ToLower(strings.Trim(o.Policy, "{}"))
+		var filtered []gpoDir
+		for _, gd := range gpoDirs {
+			guidMatch := strings.Contains(gd.GUID, needle)
+			nameMatch := strings.Contains(strings.ToLower(gpoNames[gd.GUID].DisplayName), needle)
+			if guidMatch || nameMatch {
+				filtered = append(filtered, gd)
+			}
+		}
+		if len(filtered) == 0 {
+			fmt.Fprintf(os.Stderr, cRed+"[-]"+cReset+" No GPO matched -policy %q\n", o.Policy)
+			os.Exit(1)
+		}
+		info("Filtering to %d matching GPO(s) for -policy %q", len(filtered), o.Policy)
+		gpoDirs = filtered
+	}
 
 	// ── Walk each GPO
 	var results []GPOResult
