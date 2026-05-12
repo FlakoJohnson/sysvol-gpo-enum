@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -476,8 +477,27 @@ var interestingRegPatterns = []string{
 func parseRegistryPol(data []byte) []Finding {
 	var findings []Finding
 	entries := parseRegEntries(data)
+
+	// Collect LAPS entries (old AdmPwd + new Windows LAPS) separately.
+	lapsEntries := map[string]string{} // valueName → data
 	for _, e := range entries {
-		combined := strings.ToLower(e.Key + e.Value)
+		kl := strings.ToLower(e.Key)
+		if strings.Contains(kl, "admPwd") || strings.Contains(kl, "admpwd") ||
+			strings.Contains(kl, "microsoft\\policies\\laps") {
+			lapsEntries[strings.ToLower(e.Value)] = e.Data
+		}
+	}
+	if len(lapsEntries) > 0 {
+		findings = append(findings, lapsFindings(lapsEntries)...)
+	}
+
+	for _, e := range entries {
+		kl := strings.ToLower(e.Key)
+		// Skip LAPS keys — already handled above.
+		if strings.Contains(kl, "admpwd") || strings.Contains(kl, "microsoft\\policies\\laps") {
+			continue
+		}
+		combined := kl + strings.ToLower(e.Value)
 		for _, pat := range interestingRegPatterns {
 			if strings.Contains(combined, pat) {
 				findings = append(findings, Finding{
@@ -488,6 +508,61 @@ func parseRegistryPol(data []byte) []Finding {
 				break
 			}
 		}
+	}
+	return findings
+}
+
+// lapsFindings interprets collected LAPS registry values and returns findings.
+func lapsFindings(vals map[string]string) []Finding {
+	var findings []Finding
+
+	enabled := vals["admPwdEnabled"] != "0"
+	if !enabled {
+		findings = append(findings, Finding{
+			Severity:    "INFO",
+			Description: "LAPS (legacy AdmPwd) configured — disabled",
+			Detail:      "AdmPwdEnabled = 0",
+		})
+		return findings
+	}
+
+	// Summarise config as INFO.
+	pwdLen, _ := strconv.Atoi(vals["passwordlength"])
+	pwdAge, _ := strconv.Atoi(vals["passwordagedays"])
+	complexity, _ := strconv.Atoi(vals["passwordcomplexity"])
+	backupDir := vals["backupdirectory"] // Windows LAPS: 1=AD, 2=AAD
+
+	summary := "LAPS enabled"
+	if backupDir == "2" {
+		summary = "Windows LAPS enabled (backup → AAD)"
+	} else if backupDir == "1" {
+		summary = "Windows LAPS enabled (backup → AD)"
+	}
+	detail := fmt.Sprintf("PasswordLength=%s  PasswordAgeDays=%s  PasswordComplexity=%s",
+		vals["passwordlength"], vals["passwordagedays"], vals["passwordcomplexity"])
+	findings = append(findings, Finding{Severity: "INFO", Description: summary, Detail: detail})
+
+	// Flag weak settings.
+	if pwdLen > 0 && pwdLen < 12 {
+		findings = append(findings, Finding{
+			Severity:    "MEDIUM",
+			Description: fmt.Sprintf("LAPS password length weak: %d (< 12)", pwdLen),
+			Detail:      fmt.Sprintf("PasswordLength = %d", pwdLen),
+		})
+	}
+	if pwdAge > 30 {
+		findings = append(findings, Finding{
+			Severity:    "MEDIUM",
+			Description: fmt.Sprintf("LAPS rotation interval long: %d days (> 30)", pwdAge),
+			Detail:      fmt.Sprintf("PasswordAgeDays = %d", pwdAge),
+		})
+	}
+	if complexity > 0 && complexity < 3 {
+		findings = append(findings, Finding{
+			Severity:    "MEDIUM",
+			Description: fmt.Sprintf("LAPS password complexity low: %d", complexity),
+			Detail:      fmt.Sprintf("PasswordComplexity = %d (1=letters only, 2=+numbers, 3=+special, 4=+enhanced)", complexity),
+		})
 	}
 	return findings
 }
