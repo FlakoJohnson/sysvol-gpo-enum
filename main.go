@@ -352,16 +352,25 @@ type ServiceEntry struct {
 	ClearText   string `json:"cleartext,omitempty"`
 }
 
+type RegistryEntry struct {
+	Key    string `json:"key"`
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Type   string `json:"type,omitempty"`
+	Action string `json:"action,omitempty"`
+}
+
 type GPOResult struct {
-	GUID        string         `json:"guid"`
-	DisplayName string         `json:"display_name"`
-	Flags       string         `json:"flags"`
-	Version     string         `json:"version"`
-	Path        string         `json:"path"`
-	Links       []string       `json:"links"`
-	Files       []string       `json:"files"`
-	Findings    []Finding      `json:"findings"`
-	Services    []ServiceEntry `json:"services,omitempty"`
+	GUID             string          `json:"guid"`
+	DisplayName      string          `json:"display_name"`
+	Flags            string          `json:"flags"`
+	Version          string          `json:"version"`
+	Path             string          `json:"path"`
+	Links            []string        `json:"links"`
+	Files            []string        `json:"files"`
+	Findings         []Finding       `json:"findings"`
+	Services         []ServiceEntry  `json:"services,omitempty"`
+	RegistryEntries  []RegistryEntry `json:"registry_entries,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1279,6 +1288,51 @@ func parseRegistryXML(data []byte) []Finding {
 	return findings
 }
 
+func collectRegistryXML(data []byte) []RegistryEntry {
+	var root registryXMLSettings
+	if err := xml.Unmarshal(data, &root); err != nil {
+		return nil
+	}
+	var out []RegistryEntry
+	for _, item := range root.Items {
+		p := item.Properties
+		out = append(out, RegistryEntry{
+			Key:    p.Hive + `\` + p.Key,
+			Name:   p.Name,
+			Value:  p.Value,
+			Type:   p.Type,
+			Action: p.Action,
+		})
+	}
+	return out
+}
+
+func collectRegistryPol(data []byte) []RegistryEntry {
+	var out []RegistryEntry
+	for _, e := range parseRegEntries(data) {
+		typeName := fmt.Sprintf("REG_%d", e.RegType)
+		switch e.RegType {
+		case 1:
+			typeName = "REG_SZ"
+		case 2:
+			typeName = "REG_EXPAND_SZ"
+		case 3:
+			typeName = "REG_BINARY"
+		case 4:
+			typeName = "REG_DWORD"
+		case 7:
+			typeName = "REG_MULTI_SZ"
+		}
+		out = append(out, RegistryEntry{
+			Key:   e.Key,
+			Name:  e.Value,
+			Value: e.Data,
+			Type:  typeName,
+		})
+	}
+	return out
+}
+
 // ─────────────────────────────────────────────────────────────
 // SYSVOL walker
 // ─────────────────────────────────────────────────────────────
@@ -1364,6 +1418,12 @@ func walkGPO(smbs *smbSession, gpoPath, guid string, meta gpoMeta, links []strin
 				}
 				if nameLower == "services.xml" {
 					result.Services = append(result.Services, collectServices(data)...)
+				}
+				if nameLower == "registry.xml" {
+					result.RegistryEntries = append(result.RegistryEntries, collectRegistryXML(data)...)
+				}
+				if nameLower == "registry.pol" {
+					result.RegistryEntries = append(result.RegistryEntries, collectRegistryPol(data)...)
 				}
 				if verbose {
 					info("  [%s] %s (%d bytes)", fi.Label, full, len(data))
@@ -1464,6 +1524,22 @@ func printReport(results []GPOResult, showAll bool) {
 				if svc.ClearText != "" {
 					fmt.Printf("    %s│%s   %s%scleartext=%s%s\n", cGrey, cReset, cBold, cRed, svc.ClearText, cReset)
 				}
+			}
+		}
+
+		if len(r.RegistryEntries) > 0 {
+			fmt.Printf("\n    %s%sRegistry%s\n", cBold, cWhite, cReset)
+			for _, e := range r.RegistryEntries {
+				keyVal := e.Key + `\` + e.Name + " = " + truncate(e.Value, 80)
+				meta := ""
+				if e.Type != "" {
+					meta += " [" + e.Type
+					if e.Action != "" {
+						meta += ", " + e.Action
+					}
+					meta += "]"
+				}
+				fmt.Printf("    %s│%s %s%s\n", cGrey, cReset, keyVal, meta)
 			}
 		}
 
