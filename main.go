@@ -72,10 +72,12 @@ const banner = cLime + cBold + `
   ║` + cReset + cPurple + `  GPO Enumerator  //  red team use only                             ` + cLime + cBold + `║
   ╚════════════════════════════════════════════════════════════════════════╝` + cReset + "\n"
 
-func info(f string, a ...any) { fmt.Printf(cLime+"[*]"+cReset+" "+f+"\n", a...) }
-func good(f string, a ...any) { fmt.Printf(cLime+"[+]"+cReset+" "+f+"\n", a...) }
-func warn(f string, a ...any) { fmt.Printf(cYel+"[!]"+cReset+" "+f+"\n", a...) }
-func crit(f string, a ...any) { fmt.Printf(cRed+"[!!]"+cReset+" "+cBold+f+cReset+"\n", a...) }
+func ts() string { return cGrey + time.Now().UTC().Format("15:04:05") + cReset + " " }
+
+func info(f string, a ...any) { fmt.Printf(ts()+cLime+"[*]"+cReset+" "+f+"\n", a...) }
+func good(f string, a ...any) { fmt.Printf(ts()+cLime+"[+]"+cReset+" "+f+"\n", a...) }
+func warn(f string, a ...any) { fmt.Printf(ts()+cYel+"[!]"+cReset+" "+f+"\n", a...) }
+func crit(f string, a ...any) { fmt.Printf(ts()+cRed+"[!!]"+cReset+" "+cBold+f+cReset+"\n", a...) }
 
 func header(title string) {
 	line := strings.Repeat("─", 60)
@@ -1259,7 +1261,16 @@ var scriptExts = map[string]bool{
 	".ps1": true, ".bat": true, ".cmd": true, ".vbs": true, ".js": true,
 }
 
-func walkGPO(smbs *smbSession, gpoPath, guid string, meta gpoMeta, links []string, verbose bool) GPOResult {
+// collectFile saves raw SYSVOL file bytes to outDir/sysvol/<smbPath>.
+func collectFile(outDir, smbPath string, data []byte) {
+	local := filepath.Join(outDir, "sysvol", filepath.FromSlash(strings.ReplaceAll(smbPath, "\\", "/")))
+	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
+		return
+	}
+	_ = os.WriteFile(local, data, 0644)
+}
+
+func walkGPO(smbs *smbSession, gpoPath, guid string, meta gpoMeta, links []string, outDir string, verbose bool) GPOResult {
 	result := GPOResult{
 		GUID:        guid,
 		DisplayName: meta.DisplayName,
@@ -1303,6 +1314,7 @@ func walkGPO(smbs *smbSession, gpoPath, guid string, meta gpoMeta, links []strin
 				if err != nil || fi.Parser == nil {
 					continue
 				}
+				collectFile(outDir, full, data)
 				for _, f := range fi.Parser(data) {
 					f.File      = full
 					f.FileLabel = fi.Label
@@ -1326,6 +1338,7 @@ func walkGPO(smbs *smbSession, gpoPath, guid string, meta gpoMeta, links []strin
 				if err != nil {
 					continue
 				}
+				collectFile(outDir, full, data)
 				for _, f := range parseScript(full, data) {
 					f.File      = full
 					f.FileLabel = "Script"
@@ -1593,7 +1606,7 @@ func main() {
 			disp = "{GPO-" + gd.GUID + "}"
 		}
 		info("[%d/%d] %s", i+1, len(gpoDirs), disp)
-		r := walkGPO(smbs, gd.Path, gd.GUID, meta, gpoLinks[gd.GUID], o.Verbose)
+		r := walkGPO(smbs, gd.Path, gd.GUID, meta, gpoLinks[gd.GUID], outDir, o.Verbose)
 		results = append(results, r)
 		jitter()
 	}
